@@ -58,7 +58,6 @@ QSS = """
 QWidget{color:#e8ecf2;font-family:'Segoe UI';font-size:13px}
 QPushButton{background:#171c24;border:1px solid #2a323f;border-radius:8px;padding:6px 11px}
 QPushButton:hover{border-color:#ff9f1c}
-QPushButton[pri="true"],QPushButton[act="true"]{background:#ff9f1c;color:#111;border-color:#ff9f1c;font-weight:600}
 QPushButton#close:hover{background:#ef476f;border-color:#ef476f}
 QFrame#panel,QFrame#tools{background:#171c24;border:1px solid #2a323f;border-radius:12px}
 QFrame#bar{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 rgba(0,0,0,0),stop:1 rgba(0,0,0,215))}
@@ -134,8 +133,9 @@ def mk(text, cb=None, pri=False, tip="", w=None, h=None, name=None):
     b.setCursor(Qt.PointingHandCursor)
     if tip:
         b.setToolTip(tip)
+    b._extra = ""
     if pri:
-        b.setProperty("pri", True)
+        style_btn(b, True)
     if name:
         b.setObjectName(name)
     if w:
@@ -166,20 +166,34 @@ def lab(text, kind=None):
     return l
 
 
-def combo(items, cb=None):
+def combo(items, cb=None, fit=False):
     c = QComboBox()
     c.setFocusPolicy(Qt.NoFocus)
     c.addItems(items)
+    if fit:
+        c.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToContents)
+    else:
+        c.setSizeAdjustPolicy(QComboBox.SizeAdjustPolicy.AdjustToMinimumContentsLengthWithIcon)
+        c.setMinimumContentsLength(8)
     if cb:
         c.currentIndexChanged.connect(lambda i, f=cb: f(i))
     return c
 
 
+def style_btn(b, active):
+    """Orange 'active' look, or the normal look. Always readable, also on hover."""
+    extra = getattr(b, "_extra", "")
+    if active:
+        css = ("QPushButton{background:#ff9f1c;color:#111111;border:1px solid #ff9f1c;border-radius:8px;"
+               "font-weight:600;" + extra + "}QPushButton:hover{background:#ffb84d;border-color:#ffb84d;color:#111111}")
+    else:
+        css = ("QPushButton{" + extra + "}") if extra else ""
+    b.setStyleSheet(css)
+
+
 def mark(group, name):
     for n, b in group.items():
-        b.setProperty("act", n == name)
-        b.style().unpolish(b)
-        b.style().polish(b)
+        style_btn(b, n == name)
 
 
 def wrap_scroll(w):
@@ -187,6 +201,7 @@ def wrap_scroll(w):
     sa.setWidget(w)
     sa.setWidgetResizable(True)
     sa.setFrameShape(QFrame.NoFrame)
+    sa.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
     sa.setStyleSheet("QScrollArea{background:transparent}")
     sa.viewport().setStyleSheet("background:transparent")
     return sa
@@ -200,15 +215,40 @@ class Bus(QObject):
 
 # ---------------------------------------------------------------- mpv engine wrapper
 class Engine:
-    def __init__(self, wid):
+    def _log(self, level, comp, msg):
+        try:
+            DATA.mkdir(parents=True, exist_ok=True)
+            with open(DATA / "mpv.log", "a", encoding="utf-8", errors="replace") as f:
+                f.write(f"[{level}] {comp}: {msg}")
+        except Exception:
+            pass
+
+    def __init__(self, wid, on_error=None):
+        try:
+            (DATA / "mpv.log").unlink()
+        except Exception:
+            pass
         opts = dict(vo="gpu", hwdec="auto-safe", keep_open="yes", idle="yes", input_default_bindings="no",
                     input_vo_keyboard="no", input_cursor="no", osc="no", osd_level=0, cursor_autohide="no",
                     sub_auto="fuzzy", screenshot_format="png", volume_max=200, ytdl="no")
         try:
-            self.m = mpv.MPV(wid=str(wid), **opts)
+            self.m = mpv.MPV(wid=str(wid), log_handler=self._log, loglevel="info", **opts)
         except Exception:
-            self.m = mpv.MPV(wid=str(wid))
+            self.m = mpv.MPV(wid=str(wid), log_handler=self._log, loglevel="info")
         self.cur = ""
+        try:
+            @self.m.event_callback("end-file")
+            def _eof(ev):
+                try:
+                    d = ev.as_dict() if hasattr(ev, "as_dict") else dict(ev)
+                    r = d.get("reason")
+                    r = r.decode() if isinstance(r, bytes) else r
+                    if r == "error" and on_error:
+                        on_error("This file could not be played. Details are saved in mpv.log (Local AppData, YashrajPlayer).")
+                except Exception:
+                    pass
+        except Exception:
+            pass
 
     def prop(self, k, default=None):
         try:
@@ -389,6 +429,7 @@ class Overlay(QWidget):
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAcceptDrops(True)
+        self._rev_s = False
         self.flash_t = -10.0
         self.rec_state = ""
         self.tool = None
@@ -429,11 +470,13 @@ class Overlay(QWidget):
                               ("zoom", "\U0001F50D\nZoom", "Zoom (Z)"), ("fx", "\U0001F3A8\nFilters", "Filters (E)"),
                               ("sub", "\U0001F4AC\nSubtitles", "Subtitles (C)")):
             b = mk(txt, lambda k=key: self.set_tool(k), tip=tip, w=68, h=52)
-            b.setStyleSheet("font-size:10px;padding:2px")
+            b._extra = "font-size:10px;padding:2px"
+            style_btn(b, False)
             self.tool_btns[key] = b
             v.addWidget(b)
         self.arrow = mk("\u203A", self.toggle_collapse, tip="Hide / show tools", w=24, h=36)
-        self.arrow.setStyleSheet("padding:0;font-size:18px;background:rgba(0,0,0,170)")
+        self.arrow._extra = "padding:0;font-size:18px;background:rgba(0,0,0,170)"
+        style_btn(self.arrow, False)
         # panel
         self.panel = QFrame(self)
         self.panel.setObjectName("panel")
@@ -479,18 +522,24 @@ class Overlay(QWidget):
         eh.addWidget(mk("\U0001F39A Audio", lambda: self.set_tool("audio"), tip="Audio settings (U)"))
         self.rev = mk("\u25C0 Reverse", m.toggle_rev, tip="Reverse play (J)")
         eh.addWidget(self.rev)
-        eh.addWidget(lab("Speed", "lb"))
-        self.speed = combo([("%g\u00D7" % s) + (" (Normal)" if s == 1 else "") for s in SPEEDS],
-                           lambda i: m.set_speed(SPEEDS[i]))
-        self.speed.setCurrentIndex(SPEEDS.index(1))
-        eh.addWidget(self.speed)
-        eh.addWidget(lab("Screen", "lb"))
-        self.fit = combo(FITS, m.set_fit)
-        eh.addWidget(self.fit)
-        eh.addWidget(mk("Open", m.open_dialog, tip="Open (O)"))
-        eh.addWidget(mk("\u26F6 Fullscreen", m.toggle_fullscreen, tip="Fullscreen (F)"))
         row.addWidget(self.extra)
         bv.addLayout(row)
+        self.extra2 = QWidget()
+        e2 = QHBoxLayout(self.extra2)
+        e2.setContentsMargins(0, 0, 0, 0)
+        e2.setSpacing(8)
+        e2.addWidget(lab("Speed", "lb"))
+        self.speed = combo([("%g\u00D7" % s) + (" (Normal)" if s == 1 else "") for s in SPEEDS],
+                           lambda i: m.set_speed(SPEEDS[i]), fit=True)
+        self.speed.setCurrentIndex(SPEEDS.index(1))
+        e2.addWidget(self.speed)
+        e2.addWidget(lab("Screen", "lb"))
+        self.fit = combo(FITS, m.set_fit, fit=True)
+        e2.addWidget(self.fit)
+        e2.addStretch()
+        e2.addWidget(mk("Open", m.open_dialog, tip="Open (O)"))
+        e2.addWidget(mk("\u26F6 Fullscreen", m.toggle_fullscreen, tip="Fullscreen (F)"))
+        bv.addWidget(self.extra2)
         # hint, badge, toast
         self.hint = QWidget(self)
         hv = QVBoxLayout(self.hint)
@@ -542,7 +591,8 @@ class Overlay(QWidget):
         d = {}
         for i, n in enumerate(names):
             b = mk(n, lambda n=n: cb(n))
-            b.setStyleSheet("padding:5px 8px;font-size:12px")
+            b._extra = "padding:5px 8px;font-size:12px"
+            style_btn(b, False)
             d[n] = b
             g.addWidget(b, i // 3, i % 3)
         v.addLayout(g)
@@ -621,10 +671,8 @@ class Overlay(QWidget):
     def page_sub(self):
         w, v = self._page()
         self._head(v, "Subtitles", self.main.sub_off, "Off")
-        h = QHBoxLayout()
-        h.addWidget(mk("Load file", self.main.sub_load, pri=True))
-        h.addWidget(mk("\u2728 Auto-generate", self.auto_subs))
-        v.addLayout(h)
+        v.addWidget(mk("Load subtitle file", self.main.sub_load, pri=True))
+        v.addWidget(mk("\u2728 Auto-generate with AI", self.auto_subs))
         self.sub_info = lab("No subtitles loaded.", "dim")
         v.addWidget(self.sub_info)
         self.sub_lang = combo([n for n, _ in LANGS])
@@ -698,9 +746,7 @@ class Overlay(QWidget):
         if self.tool:
             self.stack.setCurrentIndex(list(self.pages).index(self.tool))
         for k, b in self.tool_btns.items():
-            b.setProperty("act", k == self.tool)
-            b.style().unpolish(b)
-            b.style().polish(b)
+            style_btn(b, k == self.tool)
         self.panel.setVisible(bool(self.tool) and self.ui_on and not self.mini)
         self.relayout()
 
@@ -736,6 +782,7 @@ class Overlay(QWidget):
     def set_mini(self, mini):
         self.mini = mini
         self.extra.setVisible(not mini)
+        self.extra2.setVisible(not mini)
         self.show_ui(True)
         self.relayout()
 
@@ -754,8 +801,8 @@ class Overlay(QWidget):
         if self.tool:
             page = self.pages[self.tool]
             ph = min(page.sizeHint().height() + 14, max(120, h - 52 - bh - 12))
-            px = w - 24 - 4 - 72 - 8 - 250
-            self.panel.setGeometry(max(8, px), 52, 250, ph)
+            px = w - 24 - 4 - 72 - 8 - 290
+            self.panel.setGeometry(max(8, px), 52, 290, ph)
         hs = self.hint.sizeHint()
         self.hint.setGeometry((w - hs.width()) // 2, (h - hs.height()) // 2 - 30, hs.width(), hs.height())
         self.badge.adjustSize()
@@ -789,10 +836,10 @@ class Overlay(QWidget):
             self.seek.blockSignals(True)
             self.seek.setValue(int(pos / dur * 1000))
             self.seek.blockSignals(False)
-        self.play.setText("\u25B6 Play" if (paused and not rev) else "\u23F8 Pause")
-        self.rev.setProperty("act", rev)
-        self.rev.style().unpolish(self.rev)
-        self.rev.style().polish(self.rev)
+        self.play.setText("\u25B6 Play" if ((paused or not loaded) and not rev) else "\u23F8 Pause")
+        if rev != self._rev_s:
+            self._rev_s = rev
+            style_btn(self.rev, rev)
 
     # ---------- painting and mouse
     def paintEvent(self, e):
@@ -932,7 +979,7 @@ class Main(QMainWindow):
             QApplication.quit()
             return
         try:
-            self.eng = Engine(int(self.video.winId()))
+            self.eng = Engine(int(self.video.winId()), lambda msg: self.bus.toast.emit(msg))
         except Exception as ex:
             QMessageBox.critical(self, APP, "The video engine could not start.\n\n" + str(ex))
             QApplication.quit()
