@@ -228,7 +228,7 @@ class Engine:
             (DATA / "mpv.log").unlink()
         except Exception:
             pass
-        opts = dict(vo="gpu", hwdec="auto-safe", keep_open="yes", idle="yes", input_default_bindings="no",
+        opts = dict(vo="gpu", hwdec="no", hr_seek="yes", keep_open="yes", idle="yes", input_default_bindings="no",
                     input_vo_keyboard="no", input_cursor="no", osc="no", osd_level=0, cursor_autohide="no",
                     sub_auto="fuzzy", screenshot_format="png", volume_max=200, ytdl="no")
         try:
@@ -236,6 +236,12 @@ class Engine:
         except Exception:
             self.m = mpv.MPV(wid=str(wid), log_handler=self._log, loglevel="info")
         self.cur = ""
+        self.vals = {}
+        for name in ("time-pos", "duration", "pause", "idle-active", "eof-reached"):
+            try:
+                self.m.observe_property(name, self._observed)
+            except Exception:
+                pass
         try:
             @self.m.event_callback("end-file")
             def _eof(ev):
@@ -250,7 +256,13 @@ class Engine:
         except Exception:
             pass
 
+    def _observed(self, name, value):
+        self.vals[name] = value
+
     def prop(self, k, default=None):
+        v = self.vals.get(k)
+        if v is not None:
+            return v
         try:
             v = self.m[k]
             return default if v is None else v
@@ -337,17 +349,19 @@ def record_job(src, segs, bus):
         VIDS.mkdir(parents=True, exist_ok=True)
         out = VIDS / f"clip-{datetime.datetime.now():%Y%m%d-%H%M%S}.mp4"
         tmp = Path(tempfile.mkdtemp())
-        parts = []
+        parts, last_err = [], []
         for i, (a, b) in enumerate(segs):
             if b - a < 0.3:
                 continue
             o = tmp / f"p{i}.mp4"
-            run([FFMPEG, "-y", "-ss", f"{a:.3f}", "-i", src, "-t", f"{b - a:.3f}", "-c:v", "libx264",
-                 "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k", str(o)])
+            r = run([FFMPEG, "-y", "-ss", f"{a:.3f}", "-i", src, "-t", f"{b - a:.3f}", "-c:v", "libx264",
+                     "-preset", "veryfast", "-crf", "20", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", str(o)])
             if o.exists():
                 parts.append(o)
+            else:
+                last_err = (r.stderr or b"").decode("utf-8", "replace").strip().splitlines()[-1:] or ["unknown error"]
         if not parts:
-            bus.toast.emit("Recording was too short to save.")
+            bus.toast.emit("Recording could not be saved: " + (last_err[0] if last_err else "clip too short"))
             return
         if len(parts) == 1:
             shutil.move(str(parts[0]), str(out))
@@ -960,6 +974,7 @@ class Main(QMainWindow):
         self.mini, self._normal_geo = False, None
         self.muted = False
         self.rev_on, self.rev_step = False, False
+        self._open_t, self._warned = 0.0, True
         self.segs, self.seg_start, self.rec_t0, self.rec_acc = [], None, 0.0, 0.0
         self.bus = Bus()
         self.ov = Overlay(self)
@@ -1022,12 +1037,11 @@ class Main(QMainWindow):
 
     def closeEvent(self, e):
         try:
-            if self.eng:
-                self.eng.m.terminate()
+            self.ov.hide()
+            self.hide()
         except Exception:
             pass
-        self.ov.close()
-        super().closeEvent(e)
+        os._exit(0)  # leave at once: waiting for the video engine to stop can hang and leave a ghost window
 
     def dragEnterEvent(self, e):
         if e.mimeData().hasUrls():
@@ -1052,6 +1066,9 @@ class Main(QMainWindow):
         pos, dur = e.prop("time-pos"), e.prop("duration")
         paused = bool(e.prop("pause", True))
         loaded = bool(e.cur)
+        if (loaded and not self._warned and time.time() - self._open_t > 2.0 and e.vals.get("idle-active") is True):
+            self._warned = True
+            self.ov.say("This file could not be played. Press I for details.")
         if self.rev_on and pos is not None and pos <= 0.2:
             self.toggle_rev()
         elif self.rev_step and pos is not None:
@@ -1084,6 +1101,7 @@ class Main(QMainWindow):
         if self.rev_on:
             self.toggle_rev()
         self.eng.open(path)
+        self._open_t, self._warned = time.time(), False
         self.setWindowTitle(f"{Path(path).name} - {APP}")
         self.zoom_set(1)
         self.ov.sub_info.setText("No subtitles loaded.")
@@ -1100,7 +1118,7 @@ class Main(QMainWindow):
 
     def seek_rel(self, s):
         if self.eng and self.eng.cur:
-            self.eng.cmd("seek", s, "relative")
+            self.eng.cmd("seek", s, "relative+exact")
 
     def seek_frac(self, f):
         if self.eng and self.eng.cur:
@@ -1217,11 +1235,17 @@ class Main(QMainWindow):
         else:
             self.ov.say("Could not save the screenshot.")
 
+    def _seg_end(self):
+        p = self.eng.prop("time-pos")
+        if p is not None and p > self.seg_start:
+            return p
+        return self.seg_start + (time.time() - self.rec_t0) * self.cur_speed()
+
     def rec_start(self):
         if not (self.eng and self.eng.cur) or self.ov.rec_state:
             return
         self.segs, self.rec_acc = [], 0.0
-        self.seg_start = self.eng.prop("time-pos", 0.0)
+        self.seg_start = float(self.eng.prop("time-pos", 0.0))
         self.rec_t0 = time.time()
         self.ov.rec_state = "rec"
         self.ov.badge.show()
@@ -1229,7 +1253,7 @@ class Main(QMainWindow):
 
     def rec_pause(self):
         if self.ov.rec_state == "rec":
-            self.segs.append((self.seg_start, self.eng.prop("time-pos", self.seg_start)))
+            self.segs.append((self.seg_start, self._seg_end()))
             self.rec_acc += time.time() - self.rec_t0
             self.ov.rec_state = "paused"
             self.ov.rb_pause.setText("Resume")
@@ -1243,7 +1267,7 @@ class Main(QMainWindow):
         if not self.ov.rec_state:
             return
         if self.ov.rec_state == "rec":
-            self.segs.append((self.seg_start, self.eng.prop("time-pos", self.seg_start)))
+            self.segs.append((self.seg_start, self._seg_end()))
         self.ov.rec_state = ""
         self.ov.badge.hide()
         self.ov.rb_pause.setText("Pause")
@@ -1273,6 +1297,17 @@ class Main(QMainWindow):
         if not (self.eng and self.eng.cur):
             return self.ov.say("Open a video first.")
         threading.Thread(target=whisper_job, args=(self.eng.cur, lang, translate, model_file, self.bus), daemon=True).start()
+
+    def show_info(self):
+        if not self.eng:
+            return
+        g = self.eng.prop
+        txt = (f"File: {Path(self.eng.cur).name if self.eng.cur else '-'}\n"
+               f"Position {g('time-pos')}  Duration {g('duration')}  Paused {g('pause')}\n"
+               f"Video {g('video-codec')}  Audio {g('audio-codec-name')}  Format {g('file-format')}\n"
+               f"Decoder {g('hwdec-current')}  Output {g('current-vo')}\n"
+               f"Log: %LOCALAPPDATA%\\YashrajPlayer\\mpv.log")
+        self.ov.say(txt)
 
     # ---------- keyboard
     def handle_key(self, e):
@@ -1317,6 +1352,8 @@ class Main(QMainWindow):
             self.step_speed(-1)
         elif k == Qt.Key_P:
             self.toggle_mini()
+        elif k == Qt.Key_I:
+            self.show_info()
 
 
 def main():
@@ -1330,7 +1367,8 @@ def main():
         pass
     w = Main(sys.argv[1] if len(sys.argv) > 1 and os.path.exists(sys.argv[1]) else None)
     w.show()
-    sys.exit(app.exec())
+    code = app.exec()
+    os._exit(code)
 
 
 if __name__ == "__main__":
