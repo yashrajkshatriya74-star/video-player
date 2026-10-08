@@ -520,6 +520,7 @@ class Overlay(QWidget):
         row.addWidget(self.play)
         row.addWidget(mk("\u23EA 10", lambda: m.seek_rel(-10), tip="Back 10s"))
         row.addWidget(mk("10 \u23E9", lambda: m.seek_rel(10), tip="Forward 10s"))
+        row.addWidget(mk("\u21BB Replay", m.replay, tip="Play again from the start (Home)"))
         self.time = lab("0:00 / 0:00", "lb")
         row.addWidget(self.time)
         row.addStretch()
@@ -663,12 +664,12 @@ class Overlay(QWidget):
 
     def page_fx(self):
         w, v = self._page()
-        self._head(v, "Filters", lambda: self.fx_preset("Blu-ray"))
+        self._head(v, "Filters", lambda: self.fx_preset("Original"))
         self.fx_btns = self._presets(v, list(FX_PRE), self.fx_preset)
-        self.fx_s = [sl(60, 140, 102, self.fx_changed), sl(60, 160, 112, self.fx_changed),
-                     sl(0, 200, 115, self.fx_changed), sl(0, 200, 80, self.fx_changed)]
+        self.fx_s = [sl(60, 140, 100, self.fx_changed), sl(60, 160, 100, self.fx_changed),
+                     sl(0, 200, 100, self.fx_changed), sl(0, 200, 0, self.fx_changed)]
         self._rows(v, list(zip(["Brightness", "Contrast", "Color", "Sharpness"], self.fx_s)))
-        v.addWidget(lab("Default is the Blu-ray look. Original shows the video untouched.", "dim"))
+        v.addWidget(lab("Default is Original (video untouched). Pick Blu-ray for the sharper, richer look.", "dim"))
         v.addStretch()
         return w
 
@@ -843,14 +844,17 @@ class Overlay(QWidget):
             self.update()
 
     # ---------- state from the poll loop
-    def update_state(self, pos, dur, paused, loaded, rev):
+    def update_state(self, pos, dur, paused, loaded, rev, ended=False):
         self.hint.setVisible(not loaded)
         self.time.setText(f"{fmt(pos)} / {fmt(dur)}")
         if dur and pos is not None and not self.seek.drag:
             self.seek.blockSignals(True)
             self.seek.setValue(int(pos / dur * 1000))
             self.seek.blockSignals(False)
-        self.play.setText("\u25B6 Play" if ((paused or not loaded) and not rev) else "\u23F8 Pause")
+        if ended:
+            self.play.setText("\u21BB Replay")
+        else:
+            self.play.setText("\u25B6 Play" if ((paused or not loaded) and not rev) else "\u23F8 Pause")
         if rev != self._rev_s:
             self._rev_s = rev
             style_btn(self.rev, rev)
@@ -975,6 +979,7 @@ class Main(QMainWindow):
         self.muted = False
         self.rev_on, self.rev_step = False, False
         self._open_t, self._warned = 0.0, True
+        self.ended = False
         self.segs, self.seg_start, self.rec_t0, self.rec_acc = [], None, 0.0, 0.0
         self.bus = Bus()
         self.ov = Overlay(self)
@@ -999,7 +1004,7 @@ class Main(QMainWindow):
             QMessageBox.critical(self, APP, "The video engine could not start.\n\n" + str(ex))
             QApplication.quit()
             return
-        self.ov.fx_preset("Blu-ray")
+        self.ov.fx_preset("Original")
         self.ov.eq_preset("Normal")
         self.ov.sub_changed()
         self.eng.set_fit(0)
@@ -1073,7 +1078,9 @@ class Main(QMainWindow):
             self.toggle_rev()
         elif self.rev_step and pos is not None:
             e.cmd("seek", -self.cur_speed() * 0.1, "relative+keyframes")
-        self.ov.update_state(pos, dur, paused, loaded, self.rev_on)
+        self.ended = bool(loaded and not self.rev_on and (e.vals.get("eof-reached") is True or
+                          (dur and pos is not None and pos >= dur - 0.25 and paused)))
+        self.ov.update_state(pos, dur, paused, loaded, self.rev_on, self.ended)
         if self.ov.rec_state:
             secs = self.rec_acc + (time.time() - self.rec_t0 if self.ov.rec_state == "rec" else 0)
             txt = f"{int(secs // 60):02d}:{int(secs % 60):02d}"
@@ -1107,9 +1114,20 @@ class Main(QMainWindow):
         self.ov.sub_info.setText("No subtitles loaded.")
         self.ov.show_ui(True)
 
+    def replay(self):
+        if not (self.eng and self.eng.cur):
+            return
+        if self.rev_on:
+            self.toggle_rev()
+        self.eng.cmd("seek", 0, "absolute")
+        self.eng.setp("pause", "no")
+        self.ended = False
+
     def toggle_play(self):
         if not (self.eng and self.eng.cur):
             return
+        if self.ended:
+            return self.replay()
         if self.rev_on:
             self.toggle_rev()
             self.eng.setp("pause", "yes")
@@ -1354,6 +1372,8 @@ class Main(QMainWindow):
             self.toggle_mini()
         elif k == Qt.Key_I:
             self.show_info()
+        elif k == Qt.Key_Home:
+            self.replay()
 
 
 def main():
