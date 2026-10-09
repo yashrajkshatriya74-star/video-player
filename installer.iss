@@ -18,6 +18,7 @@ OutputBaseFilename=YashrajPlayer_Setup
 Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
+SetupIconFile=yashraj.ico
 ChangesAssociations=yes
 UninstallDisplayIcon={app}\{#MyAppExeName}
 
