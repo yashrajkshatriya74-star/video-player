@@ -1,6 +1,6 @@
 # Yashraj Player - Windows app (PySide6 + libmpv)
 # Plays every common video/audio format through mpv, with the same tools as the web demo.
-import sys, os, time, math, shutil, tempfile, datetime, subprocess, threading, urllib.request
+import sys, os, time, math, json, shutil, tempfile, datetime, subprocess, threading, urllib.request
 from functools import reduce
 from operator import or_
 from pathlib import Path
@@ -14,11 +14,11 @@ if hasattr(os, "add_dll_directory"):
     except Exception:
         pass
 
-from PySide6.QtCore import Qt, QTimer, QPoint, QRect, Signal, QObject, QPropertyAnimation, QAbstractAnimation, QEasingCurve
-from PySide6.QtGui import QColor, QPainter, QPen, QCursor, QIcon, QPixmap
+from PySide6.QtCore import Qt, QTimer, QPoint, QRect, QRectF, QPointF, QSize, Signal, QObject, QPropertyAnimation, QAbstractAnimation, QEasingCurve
+from PySide6.QtGui import QColor, QPainter, QPen, QCursor, QIcon, QPixmap, QPolygonF
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QPushButton, QLabel, QSlider, QComboBox, QFrame, QFileDialog, QStackedWidget,
-                               QScrollArea, QMessageBox)
+                               QScrollArea, QMessageBox, QToolButton)
 
 MPV_ERR = None
 try:
@@ -54,31 +54,70 @@ MODELS = [("Small (~470 MB, recommended)", "ggml-small.bin"), ("Base (~140 MB, f
           ("Medium (~1.5 GB, most accurate)", "ggml-medium.bin")]
 SUB_COLORS = [("White", "#FFFFFF"), ("Yellow", "#FFE14D"), ("Cyan", "#6EE7FF")]
 
-QSS = """
-QWidget{color:#e8ecf2;font-family:'Segoe UI';font-size:13px}
-QPushButton{background:#171c24;border:1px solid #2a323f;border-radius:8px;padding:6px 11px}
-QPushButton:hover{border-color:#ff9f1c}
+THEMES = {
+    "Calm Blue": dict(text="#e8eef7", dim="#8fa3c2", border="#2b4170", btn="#18284a", btnh="#203466",
+                      acc="#ff9f1c", acc2="#ffb84d", prgb="16,27,50", brgb="8,14,30"),
+    "Midnight": dict(text="#e8ecf2", dim="#8a95a6", border="#2a323f", btn="#171c24", btnh="#1f2631",
+                     acc="#ff9f1c", acc2="#ffb84d", prgb="23,28,36", brgb="0,0,0"),
+    "Sunset": dict(text="#fbeff2", dim="#c39ab0", border="#5a2f63", btn="#34203d", btnh="#42284d",
+                   acc="#ff7a59", acc2="#ff9b82", prgb="40,22,48", brgb="24,10,30"),
+    "Forest": dict(text="#e6f4ee", dim="#8fb5a8", border="#25564a", btn="#16302a", btnh="#1c3d35",
+                   acc="#4cd7a0", acc2="#7ae6bb", prgb="14,36,31", brgb="6,20,17"),
+}
+SETTINGS = DATA / "settings.json"
+
+
+def load_settings():
+    try:
+        return json.loads(SETTINGS.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def save_settings(d):
+    try:
+        DATA.mkdir(parents=True, exist_ok=True)
+        SETTINGS.write_text(json.dumps(d), encoding="utf-8")
+    except Exception:
+        pass
+
+
+_name = load_settings().get("theme", "Calm Blue")
+THEME = {"name": _name if _name in THEMES else "Calm Blue"}
+T = dict(THEMES[THEME["name"]])  # current colours (changed in place when the theme changes)
+
+QSS_TPL = """
+QWidget{color:@@text;font-family:'Segoe UI';font-size:13px}
+QPushButton,QToolButton{background:@@btn;border:1px solid @@border;border-radius:9px;padding:6px 12px}
+QPushButton:hover,QToolButton:hover{border-color:@@acc;background:@@btnh}
 QPushButton#close:hover{background:#ef476f;border-color:#ef476f}
-QFrame#panel,QFrame#tools{background:#171c24;border:1px solid #2a323f;border-radius:12px}
-QFrame#bar{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 rgba(0,0,0,0),stop:1 rgba(0,0,0,215))}
-QWidget#wc QPushButton{background:rgba(0,0,0,170)}
+QFrame#panel,QFrame#tools{background:rgba(@@prgb,238);border:1px solid @@border;border-radius:14px}
+QFrame#bar{background:qlineargradient(x1:0,y1:0,x2:0,y2:1,stop:0 rgba(@@brgb,0),stop:1 rgba(@@brgb,235))}
+QWidget#wc QPushButton{background:rgba(@@prgb,210)}
 QLabel{background:transparent}
-QLabel#dim{color:#8a95a6;font-size:12px}
-QLabel#lb{color:#8a95a6;font-size:12px}
-QLabel#toast{background:rgba(0,0,0,215);border:1px solid #2a323f;border-radius:8px;padding:8px 14px}
-QLabel#badge{background:rgba(0,0,0,185);border:1px solid #ef476f;border-radius:14px;padding:5px 12px}
-QSlider::groove:horizontal{height:4px;background:#2a323f;border-radius:2px}
-QSlider::sub-page:horizontal{background:#ff9f1c;border-radius:2px}
-QSlider::handle:horizontal{background:#ff9f1c;width:14px;height:14px;margin:-6px 0;border-radius:7px}
-QSlider::groove:vertical{width:4px;background:#2a323f;border-radius:2px}
-QSlider::add-page:vertical{background:#ff9f1c;border-radius:2px}
-QSlider::handle:vertical{background:#ff9f1c;width:14px;height:14px;margin:0 -6px;border-radius:7px}
-QComboBox{background:#171c24;border:1px solid #2a323f;border-radius:8px;padding:5px 8px}
-QComboBox QAbstractItemView{background:#171c24;selection-background-color:#ff9f1c;selection-color:#111}
+QLabel#dim{color:@@dim;font-size:12px}
+QLabel#lb{color:@@dim;font-size:12px}
+QLabel#toast{background:rgba(@@brgb,235);border:1px solid @@border;border-radius:10px;padding:8px 14px}
+QLabel#badge{background:rgba(@@brgb,215);border:1px solid #ef476f;border-radius:14px;padding:5px 12px}
+QSlider::groove:horizontal{height:4px;background:@@border;border-radius:2px}
+QSlider::sub-page:horizontal{background:@@acc;border-radius:2px}
+QSlider::handle:horizontal{background:@@acc;width:14px;height:14px;margin:-6px 0;border-radius:7px}
+QSlider::groove:vertical{width:4px;background:@@border;border-radius:2px}
+QSlider::add-page:vertical{background:@@acc;border-radius:2px}
+QSlider::handle:vertical{background:@@acc;width:14px;height:14px;margin:0 -6px;border-radius:7px}
+QComboBox{background:@@btn;border:1px solid @@border;border-radius:9px;padding:5px 8px}
+QComboBox QAbstractItemView{background:@@btn;selection-background-color:@@acc;selection-color:#101010}
 QScrollBar:vertical{width:8px;background:transparent}
-QScrollBar::handle:vertical{background:#2a323f;border-radius:4px}
+QScrollBar::handle:vertical{background:@@border;border-radius:4px}
 QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0}
 """
+
+
+def build_qss():
+    q = QSS_TPL
+    for k in sorted(T, key=len, reverse=True):
+        q = q.replace("@@" + k, str(T[k]))
+    return q
 
 
 def asset(name):
@@ -131,13 +170,200 @@ class CSlider(QSlider):
         e.ignore()
 
 
+_ICON_CACHE = {}
+BTNS = []
+ICON_MAP = {
+    "Theme": ("Theme", "theme"),
+    "\u2014  Minimize": ("Minimize", "min"),
+    "\u2750  Mini player": ("Mini player", "mini"),
+    "\u2715  Close": ("Close", "close"),
+    "\u25B6 Play": ("Play", "play"),
+    "\u23EA 10": ("10", "rew"),
+    "10 \u23E9": ("10", "fwd"),
+    "\u21BB Replay": ("Replay", "replay"),
+    "\U0001F50A": ("", "volume"),
+    "\U0001F39A Audio": ("Audio", "eq"),
+    "\u25C0 Reverse": ("Reverse", "rev"),
+    "\u26F6 Fullscreen": ("Fullscreen", "full"),
+    "Open": ("Open", "open"),
+    "Open file": ("Open file", "open"),
+    "Open folder": ("Open folder", "open"),
+    "Take screenshot": ("Take screenshot", "cam"),
+    "Start": ("Start", "rec"),
+    "Pause": ("Pause", "pause"),
+    "Stop": ("Stop", "stop"),
+    "Load subtitle file": ("Load subtitle file", "open"),
+    "\u2728 Auto-generate with AI": ("Auto-generate with AI", "spark"),
+}
+
+
+def make_icon(name, color, size=24):
+    """Clean line icons drawn in code, so every icon looks the same and takes the theme colour."""
+    key = (name, color)
+    if key in _ICON_CACHE:
+        return _ICON_CACHE[key]
+    px = size * 2
+    pm = QPixmap(px, px)
+    pm.fill(QColor(0, 0, 0, 0))
+    p = QPainter(pm)
+    p.setRenderHint(QPainter.Antialiasing)
+    p.scale(px / 64.0, px / 64.0)
+    c = QColor(color)
+    p.setPen(QPen(c, 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+    p.setBrush(Qt.NoBrush)
+
+    def poly(pts, fill=True):
+        if fill:
+            p.setBrush(c)
+        p.drawPolygon(QPolygonF([QPointF(x, y) for x, y in pts]))
+        p.setBrush(Qt.NoBrush)
+
+    def line(x1, y1, x2, y2):
+        p.drawLine(QPointF(x1, y1), QPointF(x2, y2))
+
+    def circle(cx, cy, r, fill=False):
+        if fill:
+            p.setBrush(c)
+        p.drawEllipse(QPointF(cx, cy), r, r)
+        p.setBrush(Qt.NoBrush)
+
+    def arc(x, y, w, h, a0, span):
+        p.drawArc(QRectF(x, y, w, h), int(a0 * 16), int(span * 16))
+
+    def rrect(x, y, w, h, r, fill=False):
+        if fill:
+            p.setBrush(c)
+        p.drawRoundedRect(QRectF(x, y, w, h), r, r)
+        p.setBrush(Qt.NoBrush)
+
+    if name == "play":
+        poly([(20, 10), (54, 32), (20, 54)])
+    elif name == "pause":
+        rrect(15, 12, 13, 40, 3, True)
+        rrect(36, 12, 13, 40, 3, True)
+    elif name == "stop":
+        rrect(14, 14, 36, 36, 6, True)
+    elif name == "replay":
+        arc(14, 14, 36, 36, 90, 270)
+        poly([(43, 34), (57, 34), (50, 22)])
+    elif name == "rew":
+        poly([(30, 14), (8, 32), (30, 50)])
+        poly([(56, 14), (34, 32), (56, 50)])
+    elif name == "fwd":
+        poly([(8, 14), (30, 32), (8, 50)])
+        poly([(34, 14), (56, 32), (34, 50)])
+    elif name == "rev":
+        poly([(48, 12), (14, 32), (48, 52)])
+    elif name in ("volume", "mute"):
+        poly([(8, 25), (18, 25), (30, 14), (30, 50), (18, 39), (8, 39)])
+        if name == "volume":
+            arc(26, 21, 18, 22, -55, 110)
+            arc(22, 11, 30, 42, -55, 110)
+        else:
+            line(40, 24, 56, 40)
+            line(56, 24, 40, 40)
+    elif name == "eq":
+        for x in (16, 32, 48):
+            line(x, 10, x, 54)
+        circle(16, 40, 6, True)
+        circle(32, 22, 6, True)
+        circle(48, 34, 6, True)
+    elif name == "cam":
+        rrect(6, 18, 52, 34, 7)
+        line(22, 18, 26, 11)
+        line(26, 11, 38, 11)
+        line(38, 11, 42, 18)
+        circle(32, 35, 10)
+    elif name == "rec":
+        circle(32, 32, 24)
+        circle(32, 32, 12, True)
+    elif name == "zoom":
+        circle(27, 27, 17)
+        line(40, 40, 56, 56)
+        line(21, 27, 33, 27)
+        line(27, 21, 27, 33)
+    elif name == "sun":
+        circle(32, 32, 10)
+        for k in range(8):
+            a = k * math.pi / 4
+            line(32 + 18 * math.cos(a), 32 + 18 * math.sin(a), 32 + 26 * math.cos(a), 32 + 26 * math.sin(a))
+    elif name == "subs":
+        rrect(6, 10, 52, 36, 8)
+        poly([(18, 46), (18, 58), (32, 46)])
+        line(16, 24, 48, 24)
+        line(16, 34, 38, 34)
+    elif name == "full":
+        for pts in (((8, 24), (8, 8), (24, 8)), ((40, 8), (56, 8), (56, 24)),
+                    ((8, 40), (8, 56), (24, 56)), ((56, 40), (56, 56), (40, 56))):
+            line(*pts[0], *pts[1])
+            line(*pts[1], *pts[2])
+    elif name == "min":
+        line(14, 48, 50, 48)
+    elif name == "mini":
+        rrect(6, 12, 52, 36, 6)
+        rrect(30, 28, 22, 16, 3, True)
+    elif name == "close":
+        line(14, 14, 50, 50)
+        line(50, 14, 14, 50)
+    elif name == "open":
+        poly([(6, 18), (24, 18), (30, 26), (58, 26), (58, 52), (6, 52)], False)
+    elif name == "theme":
+        circle(32, 32, 22)
+        p.setBrush(c)
+        p.drawPie(QRectF(10, 10, 44, 44), 90 * 16, 180 * 16)
+        p.setBrush(Qt.NoBrush)
+    elif name == "spark":
+        poly([(32, 6), (38, 26), (58, 32), (38, 38), (32, 58), (26, 38), (6, 32), (26, 26)])
+    p.end()
+    ic = QIcon(pm)
+    _ICON_CACHE[key] = ic
+    return ic
+
+
+def _apply_icon(b):
+    name = getattr(b, "_icon", None)
+    if name:
+        b.setIcon(make_icon(name, "#101010" if getattr(b, "_active", False) else T["text"]))
+
+
+def set_icon(b, name):
+    b._icon = name
+    _apply_icon(b)
+
+
+def mkt(text, cb, icon, tip=""):
+    """Tool button with the icon above its label."""
+    b = QToolButton()
+    b.setText(text)
+    b.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+    b.setIconSize(QSize(24, 24))
+    b.setFocusPolicy(Qt.NoFocus)
+    b.setCursor(Qt.PointingHandCursor)
+    b.setFixedSize(68, 58)
+    if tip:
+        b.setToolTip(tip)
+    b._extra = "font-size:10px;padding:3px"
+    BTNS.append(b)
+    set_icon(b, icon)
+    b.clicked.connect(lambda _=False, f=cb: f())
+    style_btn(b, False)
+    return b
+
+
 def mk(text, cb=None, pri=False, tip="", w=None, h=None, name=None):
+    icon = None
+    if text in ICON_MAP:
+        text, icon = ICON_MAP[text]
     b = QPushButton(text)
     b.setFocusPolicy(Qt.NoFocus)
     b.setCursor(Qt.PointingHandCursor)
     if tip:
         b.setToolTip(tip)
     b._extra = ""
+    BTNS.append(b)
+    if icon:
+        b.setIconSize(QSize(18, 18))
+        set_icon(b, icon)
     if pri:
         style_btn(b, True)
     if name:
@@ -185,14 +411,17 @@ def combo(items, cb=None, fit=False):
 
 
 def style_btn(b, active):
-    """Orange 'active' look, or the normal look. Always readable, also on hover."""
+    """Accent 'active' look, or the normal look. Always readable, also on hover."""
+    b._active = active
+    sel = "QToolButton" if isinstance(b, QToolButton) else "QPushButton"
     extra = getattr(b, "_extra", "")
     if active:
-        css = ("QPushButton{background:#ff9f1c;color:#111111;border:1px solid #ff9f1c;border-radius:8px;"
-               "font-weight:600;" + extra + "}QPushButton:hover{background:#ffb84d;border-color:#ffb84d;color:#111111}")
+        css = (f"{sel}{{background:{T['acc']};color:#101010;border:1px solid {T['acc']};border-radius:9px;"
+               f"font-weight:600;{extra}}}{sel}:hover{{background:{T['acc2']};border-color:{T['acc2']};color:#101010}}")
     else:
-        css = ("QPushButton{" + extra + "}") if extra else ""
+        css = (f"{sel}{{{extra}}}") if extra else ""
     b.setStyleSheet(css)
+    _apply_icon(b)
 
 
 def mark(group, name):
@@ -241,7 +470,7 @@ class Engine:
             self.m = mpv.MPV(wid=str(wid), log_handler=self._log, loglevel="info")
         self.cur = ""
         self.vals = {}
-        for name in ("time-pos", "duration", "pause", "idle-active", "eof-reached"):
+        for name in ("time-pos", "duration", "pause", "idle-active", "eof-reached", "seeking"):
             try:
                 self.m.observe_property(name, self._observed)
             except Exception:
@@ -448,6 +677,7 @@ class Overlay(QWidget):
         self.setFocusPolicy(Qt.StrongFocus)
         self.setAcceptDrops(True)
         self._rev_s = False
+        self._play_s = "play"
         self.flash_t = -10.0
         self.rec_state = ""
         self.tool = None
@@ -474,6 +704,7 @@ class Overlay(QWidget):
         h = QHBoxLayout(self.wc)
         h.setContentsMargins(0, 0, 0, 0)
         h.setSpacing(6)
+        h.addWidget(mk("Theme", m.cycle_theme, tip="Change theme (T)"))
         h.addWidget(mk("\u2014  Minimize", m.showMinimized))
         h.addWidget(mk("\u2750  Mini player", m.toggle_mini, tip="Mini player (P)"))
         h.addWidget(mk("\u2715  Close", m.close, name="close"))
@@ -484,12 +715,10 @@ class Overlay(QWidget):
         v.setContentsMargins(6, 6, 6, 6)
         v.setSpacing(6)
         self.tool_btns = {}
-        for key, txt, tip in (("shot", "\U0001F4F7\nScreenshot", "Screenshot (S)"), ("rec", "\u23FA\nRecord", "Record (R)"),
-                              ("zoom", "\U0001F50D\nZoom", "Zoom (Z)"), ("fx", "\U0001F3A8\nFilters", "Filters (E)"),
-                              ("sub", "\U0001F4AC\nSubtitles", "Subtitles (C)")):
-            b = mk(txt, lambda k=key: self.set_tool(k), tip=tip, w=68, h=52)
-            b._extra = "font-size:10px;padding:2px"
-            style_btn(b, False)
+        for key, txt, icon, tip in (("shot", "Screenshot", "cam", "Screenshot (S)"), ("rec", "Record", "rec", "Record (R)"),
+                                    ("zoom", "Zoom", "zoom", "Zoom (Z)"), ("fx", "Filters", "sun", "Filters (E)"),
+                                    ("sub", "Subtitles", "subs", "Subtitles (C)")):
+            b = mkt(txt, lambda k=key: self.set_tool(k), icon, tip)
             self.tool_btns[key] = b
             v.addWidget(b)
         self.arrow = mk("\u203A", self.toggle_collapse, tip="Hide / show tools", w=24, h=36)
@@ -782,7 +1011,7 @@ class Overlay(QWidget):
         if self.collapsed and self.tool:
             self.set_tool(self.tool)
         w, h = self.width(), self.height()
-        x_open, x_closed = w - 24 - 4 - 72, w + 4
+        x_open, x_closed = w - 24 - 4 - 80, w + 4
         self.tools.show()
         a = QPropertyAnimation(self.tools, b"pos", self)
         a.setDuration(250)
@@ -823,11 +1052,11 @@ class Overlay(QWidget):
         self.arrow.move(w - 24, ty)
         pa = getattr(self, "_pa", None)
         if not (pa and pa.state() == QAbstractAnimation.State.Running):
-            self.tools.setGeometry(w + 4 if self.collapsed else w - 24 - 4 - 72, ty, 72, th)
+            self.tools.setGeometry(w + 4 if self.collapsed else w - 24 - 4 - 80, ty, 80, th)
         if self.tool:
             page = self.pages[self.tool]
             ph = min(page.sizeHint().height() + 14, max(120, h - 52 - bh - 12))
-            px = w - 24 - 4 - 72 - 8 - 290
+            px = w - 24 - 4 - 80 - 8 - 290
             self.panel.setGeometry(max(8, px), 52, 290, ph)
         hs = self.hint.sizeHint()
         self.hint.setGeometry((w - hs.width()) // 2, (h - hs.height()) // 2 - 30, hs.width(), hs.height())
@@ -862,10 +1091,11 @@ class Overlay(QWidget):
             self.seek.blockSignals(True)
             self.seek.setValue(int(pos / dur * 1000))
             self.seek.blockSignals(False)
-        if ended:
-            self.play.setText("\u21BB Replay")
-        else:
-            self.play.setText("\u25B6 Play" if ((paused or not loaded) and not rev) else "\u23F8 Pause")
+        st = "replay" if ended else ("play" if ((paused or not loaded) and not rev) else "pause")
+        if st != self._play_s:
+            self._play_s = st
+            self.play.setText({"replay": "Replay", "play": "Play", "pause": "Pause"}[st])
+            set_icon(self.play, st)
         if rev != self._rev_s:
             self._rev_s = rev
             style_btn(self.rev, rev)
@@ -882,7 +1112,8 @@ class Overlay(QWidget):
             col = QColor(239, 71, 111, 230)
         ft = now - self.flash_t
         if ft < 1.0:
-            col = QColor(255, 159, 28, int(255 * (1 if ft < 0.4 else 1 - (ft - 0.4) / 0.6)))
+            col = QColor(T["acc"])
+            col.setAlpha(int(255 * (1 if ft < 0.4 else 1 - (ft - 0.4) / 0.6)))
         if col is not None and col.alpha() > 0:
             p.setPen(QPen(col, 7))
             p.drawRect(self.rect().adjusted(3, 3, -4, -4))
@@ -990,6 +1221,7 @@ class Main(QMainWindow):
         self.mini, self._normal_geo = False, None
         self.muted = False
         self.rev_on, self.rev_step = False, False
+        self.rev_pos, self.rev_t = 0.0, 0.0
         self._open_t, self._warned = 0.0, True
         self.ended = False
         self.segs, self.seg_start, self.rec_t0, self.rec_acc = [], None, 0.0, 0.0
@@ -1086,10 +1318,8 @@ class Main(QMainWindow):
         if (loaded and not self._warned and time.time() - self._open_t > 2.0 and e.vals.get("idle-active") is True):
             self._warned = True
             self.ov.say("This file could not be played. Press I for details.")
-        if self.rev_on and pos is not None and pos <= 0.2:
-            self.toggle_rev()
-        elif self.rev_step and pos is not None:
-            e.cmd("seek", -self.cur_speed() * 0.1, "relative+keyframes")
+        if self.rev_on:
+            self._reverse_tick(e)
         self.ended = bool(loaded and not self.rev_on and (e.vals.get("eof-reached") is True or
                           (dur and pos is not None and pos >= dur - 0.25 and paused)))
         self.ov.update_state(pos, dur, paused, loaded, self.rev_on, self.ended)
@@ -1162,7 +1392,7 @@ class Main(QMainWindow):
         self.muted = not self.muted
         if self.eng:
             self.eng.setp("mute", "yes" if self.muted else "no")
-        self.ov.mute.setText("\U0001F507" if self.muted else "\U0001F50A")
+        set_icon(self.ov.mute, "mute" if self.muted else "volume")
 
     def set_speed(self, r):
         if self.eng:
@@ -1173,21 +1403,34 @@ class Main(QMainWindow):
         i = max(0, min(len(SPEEDS) - 1, self.ov.speed.currentIndex() + d))
         self.ov.speed.setCurrentIndex(i)
 
+    def _rev_off(self, resume):
+        self.rev_on, self.rev_step = False, False
+        if self.eng and resume:
+            self.eng.setp("pause", "no")
+
     def toggle_rev(self):
         if not (self.eng and self.eng.cur):
             return
-        if not self.rev_on:
-            self.rev_on = True
-            if self.eng.setp("play-direction", "-"):
-                self.rev_step = False
-            else:  # older mpv: step backwards with seeks
-                self.rev_step = True
-            self.eng.setp("pause", "yes" if self.rev_step else "no")
-            self.ov.say(f"\u25C0\u25C0 Reverse {self.cur_speed():g}\u00D7")
-        else:
-            self.rev_on, self.rev_step = False, False
-            self.eng.setp("play-direction", "+")
-            self.eng.setp("pause", "no")
+        if self.rev_on:
+            return self._rev_off(True)
+        pos = self.eng.prop("time-pos")
+        if pos is None or pos < 0.5:
+            return self.ov.say("Play the video a little first, then use Reverse.")
+        self.rev_on, self.rev_step = True, True
+        self.rev_pos, self.rev_t = float(pos), time.time()
+        self.eng.setp("pause", "yes")
+        self.ov.say(f"Reverse {self.cur_speed():g}\u00D7")
+
+    def _reverse_tick(self, e):
+        now = time.time()
+        dt, self.rev_t = now - self.rev_t, now
+        self.rev_pos -= self.cur_speed() * dt
+        if self.rev_pos <= 0.05:
+            e.cmd("seek", 0, "absolute+exact")
+            self._rev_off(False)
+            self.ov.say("Reached the start")
+        elif not e.vals.get("seeking"):
+            e.cmd("seek", f"{self.rev_pos:.3f}", "absolute+exact" if self.cur_speed() <= 2 else "absolute+keyframes")
 
     def set_fit(self, i):
         if self.eng:
@@ -1245,6 +1488,21 @@ class Main(QMainWindow):
             if self._normal_geo:
                 self.setGeometry(self._normal_geo)
         self.ov.set_mini(self.mini)
+
+    def cycle_theme(self):
+        names = list(THEMES)
+        self.apply_theme(names[(names.index(THEME["name"]) + 1) % len(names)])
+
+    def apply_theme(self, name):
+        T.clear()
+        T.update(THEMES[name])
+        THEME["name"] = name
+        QApplication.instance().setStyleSheet(build_qss())
+        for b in BTNS:
+            style_btn(b, getattr(b, "_active", False))
+        self.ov.update()
+        save_settings({"theme": name})
+        self.ov.say("Theme: " + name)
 
     def open_folder(self, p):
         try:
@@ -1386,13 +1644,15 @@ class Main(QMainWindow):
             self.show_info()
         elif k == Qt.Key_Home:
             self.replay()
+        elif k == Qt.Key_T:
+            self.cycle_theme()
 
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP)
     app.setWindowIcon(QIcon(asset("yashraj.ico")))
-    app.setStyleSheet(QSS)
+    app.setStyleSheet(build_qss())
     try:
         import locale
         locale.setlocale(locale.LC_NUMERIC, "C")  # libmpv needs this
