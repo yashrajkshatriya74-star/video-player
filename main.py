@@ -15,7 +15,7 @@ if hasattr(os, "add_dll_directory"):
         pass
 
 from PySide6.QtCore import Qt, QTimer, QPoint, QRect, Signal, QObject, QPropertyAnimation, QAbstractAnimation, QEasingCurve
-from PySide6.QtGui import QColor, QPainter, QPen, QCursor
+from PySide6.QtGui import QColor, QPainter, QPen, QCursor, QIcon, QPixmap
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
                                QPushButton, QLabel, QSlider, QComboBox, QFrame, QFileDialog, QStackedWidget,
                                QScrollArea, QMessageBox)
@@ -79,6 +79,10 @@ QScrollBar:vertical{width:8px;background:transparent}
 QScrollBar::handle:vertical{background:#2a323f;border-radius:4px}
 QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical{height:0}
 """
+
+
+def asset(name):
+    return os.path.join(BASE, name)
 
 
 def fmt(t):
@@ -489,6 +493,7 @@ class Overlay(QWidget):
             self.tool_btns[key] = b
             v.addWidget(b)
         self.arrow = mk("\u203A", self.toggle_collapse, tip="Hide / show tools", w=24, h=36)
+        self.arrow.setParent(self)
         self.arrow._extra = "padding:0;font-size:18px;background:rgba(0,0,0,170)"
         style_btn(self.arrow, False)
         # panel
@@ -558,6 +563,12 @@ class Overlay(QWidget):
         # hint, badge, toast
         self.hint = QWidget(self)
         hv = QVBoxLayout(self.hint)
+        logo = QLabel()
+        pm = QPixmap(asset("yashraj.png"))
+        if not pm.isNull():
+            logo.setPixmap(pm.scaled(96, 96, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        logo.setAlignment(Qt.AlignCenter)
+        hv.addWidget(logo)
         t = QLabel("Yashraj Player")
         t.setStyleSheet("font-size:26px;font-weight:600")
         t.setAlignment(Qt.AlignCenter)
@@ -964,6 +975,7 @@ class Main(QMainWindow):
     def __init__(self, path=None):
         super().__init__()
         self.setWindowTitle(APP)
+        self.setWindowIcon(QIcon(asset("yashraj.ico")))
         self.setWindowFlag(Qt.FramelessWindowHint, True)
         self.resize(1100, 650)
         self.setMinimumSize(360, 220)
@@ -1379,6 +1391,7 @@ class Main(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName(APP)
+    app.setWindowIcon(QIcon(asset("yashraj.ico")))
     app.setStyleSheet(QSS)
     try:
         import locale
