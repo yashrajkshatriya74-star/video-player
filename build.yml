@@ -73,7 +73,7 @@ jobs:
 
       - name: Build app with PyInstaller (fast-starting folder build)
         run: |
-          pyinstaller --noconfirm --onedir --windowed --name "YashrajPlayer" --add-binary "libmpv-2.dll;." --add-binary "ffmpeg.exe;." --add-data "whisper;whisper" --hidden-import mpv main.py
+          pyinstaller --noconfirm --onedir --windowed --name "YashrajPlayer" --add-binary "libmpv-2.dll;." --add-binary "ffmpeg.exe;." --add-data "whisper;whisper" --add-data "yashraj.ico;." --add-data "yashraj.png;." --icon yashraj.ico --hidden-import mpv main.py
 
       - name: Install Inno Setup
         run: choco install innosetup -y
