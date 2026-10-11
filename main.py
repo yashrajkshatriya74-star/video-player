@@ -914,11 +914,15 @@ class Overlay(QWidget):
 
     def page_audio(self):
         w, v = self._page()
-        self._head(v, "Audio", lambda: self.eq_preset("Normal"))
+        self._head(v, "Audio", self.audio_default)
         self.eq_btns = self._presets(v, list(EQ_PRE), self.eq_preset)
         self.eq_s = [sl(-12, 12, 0, self.eq_changed) for _ in EQ_F] + [sl(100, 200, 100, self.eq_changed)]
         self._rows(v, list(zip(EQ_NAMES + ["Boost"], self.eq_s)))
-        v.addWidget(lab("Boost above 100% can distort at high volume.", "dim"))
+        self.eq_sync = sl(-30, 30, 0, self.sync_changed)
+        self.sync_l = lab("0.0s", "lb")
+        self._rows(v, [("A/V sync", self.eq_sync), ("", self.sync_l)])
+        v.addWidget(mk("Fix audio sync now", self.main.resync_av_manual))
+        v.addWidget(lab("Boost above 100% can distort at high volume. If the voices run ahead of or behind the picture, use Fix audio sync now, or move the A/V sync slider.", "dim"))
         v.addStretch()
         return w
 
@@ -982,6 +986,15 @@ class Overlay(QWidget):
     def eq_changed(self, _=None):
         mark(self.eq_btns, None)
         self.apply_eq()
+
+    def audio_default(self):
+        self.eq_sync.setValue(0)
+        self.eq_preset("Normal")
+
+    def sync_changed(self, val):
+        self.sync_l.setText(f"{val / 10:+.1f}s")
+        if self.main.eng:
+            self.main.eng.setp("audio-delay", val / 10)
 
     def sub_changed(self, _=None):
         self.ss_dl.setText(f"{self.ss_delay.value() / 10:+.1f}s")
@@ -1222,6 +1235,7 @@ class Main(QMainWindow):
         self.muted = False
         self.rev_on, self.rev_step = False, False
         self.rev_pos, self.rev_t = 0.0, 0.0
+        self.skip_times, self._resync_t, self._drift_n, self._last_resync = [], 0.0, 0, 0.0
         self._open_t, self._warned = 0.0, True
         self.ended = False
         self.segs, self.seg_start, self.rec_t0, self.rec_acc = [], None, 0.0, 0.0
@@ -1323,6 +1337,22 @@ class Main(QMainWindow):
         self.ended = bool(loaded and not self.rev_on and (e.vals.get("eof-reached") is True or
                           (dur and pos is not None and pos >= dur - 0.25 and paused)))
         self.ov.update_state(pos, dur, paused, loaded, self.rev_on, self.ended)
+        now = time.time()
+        if self._resync_t and now >= self._resync_t:
+            self._resync_t = 0.0
+            self.resync_av()
+        if loaded and not paused and not self.rev_on:
+            try:
+                d = abs(float(e.prop("avsync", 0.0)))
+            except Exception:
+                d = 0.0
+            if d > 0.3:
+                self._drift_n += 1
+                if self._drift_n >= 10 and now - self._last_resync > 5:
+                    self._drift_n = 0
+                    self.resync_av()
+            else:
+                self._drift_n = 0
         if self.ov.rec_state:
             secs = self.rec_acc + (time.time() - self.rec_t0 if self.ov.rec_state == "rec" else 0)
             txt = f"{int(secs // 60):02d}:{int(secs % 60):02d}"
@@ -1379,6 +1409,29 @@ class Main(QMainWindow):
     def seek_rel(self, s):
         if self.eng and self.eng.cur:
             self.eng.cmd("seek", s, "relative+exact")
+            now = time.time()
+            self.skip_times = [t for t in self.skip_times if now - t < 4] + [now]
+            if len(self.skip_times) >= 3:
+                self._resync_t = now + 0.9
+
+    def resync_av(self, force=False):
+        """Flush and re-start audio and video from the exact same position."""
+        e = self.eng
+        if not (e and e.cur) or self.rev_on:
+            return
+        if not force and (e.prop("pause", False) or e.vals.get("seeking")):
+            return
+        pos = e.prop("time-pos")
+        if pos is None:
+            return
+        self._last_resync = time.time()
+        e.cmd("seek", f"{float(pos):.3f}", "absolute+exact")
+
+    def resync_av_manual(self):
+        if not (self.eng and self.eng.cur):
+            return self.ov.say("Open a video first.")
+        self.resync_av(force=True)
+        self.ov.say("Audio and video re-synced")
 
     def seek_frac(self, f):
         if self.eng and self.eng.cur:
@@ -1404,9 +1457,13 @@ class Main(QMainWindow):
         self.ov.speed.setCurrentIndex(i)
 
     def _rev_off(self, resume):
+        was = self.rev_on
         self.rev_on, self.rev_step = False, False
         if self.eng and resume:
+            if was:
+                self.eng.cmd("seek", f"{max(0.0, self.rev_pos):.3f}", "absolute+exact")
             self.eng.setp("pause", "no")
+            self._last_resync = time.time()
 
     def toggle_rev(self):
         if not (self.eng and self.eng.cur):
